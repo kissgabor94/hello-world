@@ -22,24 +22,24 @@ using namespace std;
 using namespace cv;
 using std::cout;
 
-//kamera adatai
+//Configuration of the camera
 #define HEIGHT 720
 #define WIDTH 1280
 
-//Illesztett térgörbe fokszáma (+1)
+//Degree of the polynomial, used to estimate the trajectory (+1)
 #define xdim 3
 
-#define goalX 5000					//kapu távolsága a kamera középpontjától
-#define CameraHeight 3800			//kamera magassága
-#define BallRadius 100				//milimeterben
+#define goalX 5000				//Horizontal distance of goal from the center of the camera
+#define CameraHeight 3800			//Vertical heigth of camera
+#define BallRadius 100				//Millimeters are used throughout the whole project
 
 
-//pontosságot befolyásoló paraméterek
+//Margins of error
 #define ErrorMargin 5
 #define Marginx 120
 #define Marginy 30
 
-//Globális változók
+//Global variables
 Serial* SP;
 sl::zed::Camera* zed;
 std::mutex MemLock;
@@ -53,7 +53,7 @@ int conf_quantity_threshold = 4;
 
 Vec3f Ball;
 Vec3f BackGround;
-int PixelMargin = 160;		//maximum mennyi lehet a talált pixel értéke a szürkeárnyalatos képen
+int PixelMargin = 160;		//Intensity threshold of the found pixels
 
 bool Quit;
 int Difficulty = 1;
@@ -67,7 +67,7 @@ vector<Vec3f> CalibrationMatrix;
 deque<double> Tips;
 const int MAWindow = 3;
 
-//többszálasítás
+//Global variables used in the parallel computing
 cv::Mat curr_left = cv::Mat(HEIGHT, WIDTH, CV_8UC4);
 cv::Mat prev_left = cv::Mat(HEIGHT, WIDTH, CV_8UC4);
 long long curr_Time;
@@ -147,7 +147,7 @@ int IranyIterator(int i)
 		return 0;
 	}
 }
-void getpicture()
+void getpicture() 
 {
 	SetPriorityClass(GetCurrentProcess(), 0x00000100);
 	SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
@@ -180,45 +180,46 @@ Vec3d polinom(cv::Mat A, double t)
 	}
 	return vissza;
 }
-cv::Mat PolinomEgyutthatok(vector<Vec4d> meresek, vector<double> sulyok)
+cv::Mat PolinomEgyutthatok(vector<Vec4d> Measurements, vector<double> Weights) //Computes the coefficients of the polynomial
 {
-	//X * A ~= Y
-	//Timehatványmátrix - N x xdim
-	//Az X mátrixot feltöltjük az idõértékek hatványaival
-	cv::Mat X = Mat::ones(meresek.size(), xdim, CV_64F);
-	cv::Mat W = Mat::zeros(meresek.size(), meresek.size(), CV_64F);
-	cv::Mat vissza; cv::Mat vissza_sulyozva;
-	for (int i = 0; i < meresek.size(); i++)
+	//X * A ~= Y - X: timeexponents, A: coefficients, Y: three-dimensional positions in time points defined in X
+	//Timeexponent mtrix - N x xdim
+	//X matrix is filled with the exponents of the timestamps
+	cv::Mat X = Mat::ones(Measurements.size(), xdim, CV_64F);
+	cv::Mat W = Mat::zeros(Measurements.size(), Measurements.size(), CV_64F);
+	cv::Mat returnValue; cv::Mat weightedReturnValue;
+	for (int i = 0; i < Measurements.size(); i++)
 	{
 		for (int j = 0; j < xdim; j++)
 		{
 			for (int k = 0; k < j; k++)
 			{
-				X.at<double>(i, j) *= (meresek[i][3]);
+				X.at<double>(i, j) *= (Measurements[i][3]);
 			}
 		}
-		W.at<double>(i, i) = sulyok[i];
+		W.at<double>(i, i) = Weights[i];
 	}
 
-	//Az Y mátrixot feltöltjük az idõértékekhez tartozó pozícióértékekkel [3]
-	cv::Mat Y = Mat(meresek.size(), 3, CV_64F);
+	//Y matrix is filled with position data [3]
+	cv::Mat Y = Mat(Measurements.size(), 3, CV_64F);
 
-	for (int i = 0; i < meresek.size(); i++)
+	for (int i = 0; i < Measurements.size(); i++)
 	{
 		for (int n = 0; n < 3; n++)
 		{
-			Y.at<double>(i, n) = meresek[i][n];
+			Y.at<double>(i, n) = Measurements[i][n];
 		}
 	}
-	vissza = (((X.t() * X).inv()) * X.t()) * Y;
-	vissza_sulyozva = (((X.t()*W * X).inv()) * X.t()) *W* Y;
+	//Both weighted and unweighted case is computed, disabling the for loop before returns with latter
+	//Estimation is based on the method of least squares
+	returnValue = (((X.t() * X).inv()) * X.t()) * Y;
+	weightedReturnValue = (((X.t()*W * X).inv()) * X.t()) *W* Y;
 	for (int i = 0; i < xdim; i++)
 	{
-		vissza.at<double>(i, 0) = vissza_sulyozva.at<double>(i, 0);
-		vissza.at<double>(i, 2) = vissza_sulyozva.at<double>(i, 2);
+		returnValue.at<double>(i, 0) = weightedReturnValue.at<double>(i, 0);
+		returnValue.at<double>(i, 2) = weightedReturnValue.at<double>(i, 2);
 	}
-	//Kiszámoljuk az együtthatómátrixot
-	return vissza;
+	return returnValue;
 }
 vector<Vec4d> szures(vector<Vec4d> meresek, vector<double> sulyok)
 {
@@ -249,13 +250,11 @@ vector<Vec4d> szures(vector<Vec4d> meresek, vector<double> sulyok)
 }
 double root(vector<double> be)
 {
-	if (xdim == 3)
+	if (xdim == 3) //Solving second degree polinomial. If result is invalid, 750 is returned as a default estimation
 	{
-	//	cout << "a=" << to_string(be[2]) << " b=" << to_string(be[1]) << " c=" << to_string(be[0]) << endl;
 		double D = be[1] * be[1] - 4 * be[0] * be[2];
 		if (D < 0)
 		{
-			cout << "negativ D" << endl;
 			return 750;
 		}
 		double t1, t2;
@@ -331,11 +330,11 @@ bool SorosCsatolas()
 }
 bool KalibraciosFajlBetoltese()
 {
-	//alapértelmezésként egységmátrix beállítása
+	//Set identity matrix as a default
 	CalibrationMatrix.push_back(Vec3f(	1	,	0	,	0	));
 	CalibrationMatrix.push_back(Vec3f(	0	,	1	,	0	));
 	CalibrationMatrix.push_back(Vec3f(	0	,	0	,	1	));
-	//HA van kalibrációs fájl, mátrix betöltése
+	//If there is a calibration file, load it
 	string ideig;
 	if (ifstream("kalib.txt"))
 	{
@@ -350,12 +349,12 @@ bool KalibraciosFajlBetoltese()
 			CalibrationMatrix[a][2] = stof(ideig);
 		}
 		kalib.close();
-		std::cout << "Kalibracios fajl beolvasva" << std::endl;
+		std::cout << "Calibration file loaded" << std::endl;
 		return true;
 	}
 	else
 	{
-		std::cout << "Nincs kalibracios file!" << endl;
+		std::cout << "No calibration file found!" << endl;
 		return false;
 	}
 }
@@ -378,285 +377,98 @@ bool KonfiguraciosFajlBetoltese()
 			conf_quantity_threshold = stoi(ideig);
 		
 		kalibconf.close();
-		std::cout << "Config file betoltve" << endl;
+		std::cout << "Configuration file loaded" << endl;
 		return true;
 	}
 	else
 	{
-		std::cout << "Nincs config file!" << endl;
+		std::cout << "No configuration file found!" << endl;
 		return false;
 	}
 }
-bool SzinFajlBetoltese()
-{
-	string ideig;
-	float r, g, b;
-	int value = 0;
-	if (ifstream("color.txt"))
-	{
-		ifstream kalibcolor("color.txt");
 
-		std::getline(kalibcolor, ideig, ',');
-		r = stof(ideig);
-		std::getline(kalibcolor, ideig, ',');
-		g = stof(ideig);
-		std::getline(kalibcolor, ideig, ',');
-		b = stoi(ideig);
-
-		Ball = (r, g, b);
-
-		std::getline(kalibcolor, ideig, ',');
-		r = stof(ideig);
-		std::getline(kalibcolor, ideig, ',');
-		g = stof(ideig);
-		std::getline(kalibcolor, ideig, ',');
-		b = stof(ideig);
-
-		BackGround = (r, g, b);
-
-		std::getline(kalibcolor, ideig, ',');
-		value = stoi(ideig);
-		zed->setCameraSettingsValue(sl::zed::ZEDCamera_settings::ZED_BRIGHTNESS, value, false);
-		std::getline(kalibcolor, ideig, ',');
-		value = stoi(ideig);
-		zed->setCameraSettingsValue(sl::zed::ZEDCamera_settings::ZED_CONTRAST, value, false);
-		std::getline(kalibcolor, ideig, ',');
-		value = stoi(ideig);
-		zed->setCameraSettingsValue(sl::zed::ZEDCamera_settings::ZED_HUE, value, false);
-		std::getline(kalibcolor, ideig, ',');
-		value = stoi(ideig);
-		zed->setCameraSettingsValue(sl::zed::ZEDCamera_settings::ZED_SATURATION, value, false);
-		std::getline(kalibcolor, ideig, ',');
-		value = stoi(ideig);
-		zed->setCameraSettingsValue(sl::zed::ZEDCamera_settings::ZED_GAIN, value, false);
-		std::getline(kalibcolor, ideig, ',');
-		value = stoi(ideig);
-		zed->setCameraSettingsValue(sl::zed::ZEDCamera_settings::ZED_EXPOSURE, value, false);
-		std::getline(kalibcolor, ideig, ',');
-		value = stoi(ideig);
-		if (value == 1)
-		{
-			zed->setCameraSettingsValue(sl::zed::ZEDCamera_settings::ZED_EXPOSURE, value, true);
-			zed->setCameraSettingsValue(sl::zed::ZEDCamera_settings::ZED_GAIN, value, true);
-		}
-		std::getline(kalibcolor, ideig);
-		value = stoi(ideig);
-		PixelMargin = value;
-
-		kalibcolor.close();
-		std::cout << "Color file betoltve" << endl;
-		return true;
-	}
-	else
-	{
-		std::cout << "Nincs color file!" << endl;
-		return false;
-	}
-}
 void HelpKiirasa()
 {
-	std::cout << "h: instrukciok" << endl;
-	std::cout << "n: nulla pozicioba allas" << endl;
-	std::cout << "t: funkcioteszt" << endl;
-	std::cout << "p: pozíció keresése" << endl;
-	std::cout << "a: ZED ujracsatlakozas" << endl;
-	std::cout << "s: soros ujracsatlakozas" << endl;
-	std::cout << "c: kalibracio " << endl;
-	std::cout << "d: Difficulty beallitasa (inaktív)" << endl;
-	std::cout << "q: Quites" << endl;
-	std::cout << "u: Time merese" << endl;
-	std::cout << "v: loves varasa (xyz)" << endl;
-	std::cout << "o: kameraparameterek es szinek beallitasa" << endl;
+	std::cout << "h: Print instructions" << endl;
+	std::cout << "n: Set goalkeeper to zero position" << endl;
+	std::cout << "p: Run position search on a single image" << endl;
+	std::cout << "a: Reconnect ZED" << endl;
+	std::cout << "s: Reconnect to serial port" << endl;
+	std::cout << "c: Calibration " << endl;
+	std::cout << "d: Set difficulty" << endl;
+	std::cout << "q: Quit" << endl;
+	std::cout << "u: Measure runtime" << endl;
+	std::cout << "v: Start main sequence - wait for penalty" << endl;
 }
-String SorosFormatum(double szog)
+String SorosFormatum(double targetAngle) //Creating a character string for the serial output
 {
-	String kimegy = "s"+to_string(Difficulty);
-	double S = szog;
+	String output = "s"+to_string(Difficulty);
+	double S = targetAngle;
 	if (S < -80)
 		S = -80;
 	if (S > 80)
 		S = 80;
 	if (S >= 0)
 	{
-		kimegy += "+";
+		output += "+";
 	}
 	else
 	{
-		kimegy += "-";
+		output += "-";
 		S = 0 - S;
 	}
 	if (S < 10)
-		kimegy += "0";
-	kimegy += to_string(int(S));
-	kimegy += Lamp+"e";
-	return kimegy;
+		output += "0";
+	output += to_string(int(S));
+	output += Lamp+"e";
+	return output;
 }
 void filebairas(string mit)
 {
-	bool kint = true;
-	string cel = "";
-	int szam = 0;
-	while (kint)
+	bool done = true;
+	string dest = "";
+	int s = 0;
+	while (done)
 	{
-		cel = "palya" + to_string(szam) + ".csv";
-		if (!ifstream(cel))
+		dest = "palya" + to_string(s) + ".csv";
+		if (!ifstream(dest))
 		{
-			ofstream kiir(cel);
+			ofstream kiir(dest);
 			kiir << mit;
-			kint = false;
+			done = false;
 		}
 		else
 		{
-			szam++;
+			s++;
 		}
 	}
 }
 double moving_average()
 {
-	double vissza = 0;
+	double ret = 0;
 	for (int i = 0; i < MAWindow; i++)
 	{
-		vissza += Tips[i];
+		ret += Tips[i];
 	}
-	vissza /= MAWindow;
-	return vissza;
+	ret /= MAWindow;
+	return ret;
 }
-struct Pont {
-	int x;
-	int y;
-	Pont(int x, int y)
-	{
-		this->x = x;
-		this->y = y;
-	}
-};
-struct PontSugar {
-	int x;
-	int y;
-	int r;
-	PontSugar(int x, int y, int r)
-	{
-		this->x = x;
-		this->y = y;
-		this->r = r;
-	}
-};
-struct PacaManager {
-	int xmin, xmax, ymin, ymax;
-	int X, Y, r;
-	int szelesseg, magassag, count;
-	float josag;
-	PacaManager(vector<Pont> paca)
-	{
-		this->xmin = 2000;
-		this->ymin = 2000;
-		this->xmax = 0;
-		this->ymax = 0;
-
-		this->count = 0;
-
-		for each (Pont p in paca)
-		{
-			(this->count)++;
-			if (p.x < xmin)
-				xmin = p.x;
-			if (p.y < ymin)
-				ymin = p.y;
-			if (p.x > xmax)
-				xmax = p.x;
-			if (p.y > ymax)
-				ymax = p.y;
-		}
-		this->szelesseg = xmax - xmin;
-		this->magassag = ymax - ymin;
-		this->X = (int)((xmin + xmax) / 2);
-		this->Y = (int)((ymin + ymax) / 2);
-		float optimalis_terulet = 3.142 * szelesseg * magassag / 4;
-		this->r = int(sqrt(szelesseg*magassag / 4));
-		this->josag = (min(szelesseg, magassag) / max(szelesseg, magassag)) * (min(optimalis_terulet, float(this->count)) / max(optimalis_terulet, float(this->count)));
-	}
-};
-int ElarasztasRekurzio(cv::Mat kep, Pont pont, cv::Mat& flag, vector<Pont>& paca, uchar NarancsThreshold)
+cv::Mat DifiKepzes(cv::Mat Image, Vec3f BallColour, Vec3f BackGroundColour)
 {
-	if (pont.x > 0 && pont.y > 0 && pont.x < kep.size().width && pont.y < kep.size().height)
-	{
-	//	cout << pont.x << "  " << pont.y << endl;
-		if (flag.at<uchar>(pont.y, pont.x)!=0)
-		{
-			int count = 0;
-			flag.at<uchar>(pont.y, pont.x) = 0;
-			if (kep.at<uchar>(pont.y, pont.x) < NarancsThreshold)
-			{
-				count++;
-				paca.push_back(pont);
-				count += ElarasztasRekurzio(kep, Pont(pont.x + 1, pont.y), flag, paca, NarancsThreshold);
-				count += ElarasztasRekurzio(kep, Pont(pont.x, pont.y + 1), flag, paca, NarancsThreshold);
-				count += ElarasztasRekurzio(kep, Pont(pont.x - 1, pont.y), flag, paca, NarancsThreshold);
-				count += ElarasztasRekurzio(kep, Pont(pont.x, pont.y - 1), flag, paca, NarancsThreshold);
-			}
-			return count;
-		}
-		else return 0;
-	}
-	else return 0;
-}
-vector<vector<Pont>> PacakKeresese(cv::Mat kep, uchar NarancsThreshold, int MeretThreshold)
-{
-	Mat Flags = Mat::ones(kep.size().height, kep.size().width, CV_8U);
-	vector<vector<Pont>> vissza;
-	int i, j;
-	for (i = 0; i < kep.size().width; i++)
-	for (j = 0; j < kep.size().height; j++)
-	{
-		if (Flags.at<uchar>(j, i))
-		{
-			Flags.at<uchar>(j, i) = 0;
-			if (kep.at<uchar>(j, i) < NarancsThreshold)
-			{
-				vissza.push_back(vector<Pont>());
-				if (ElarasztasRekurzio(kep, Pont(i, j), Flags, vissza[vissza.size()-1], NarancsThreshold) < MeretThreshold)
-					vissza.pop_back();
-			}
-		}
-	}
-	return vissza;
-}
-PontSugar TalaltBall(cv::Mat kep, uchar NarancsThreshold, int MeretThreshold)
-{
-	vector<vector<Pont>> Pacak = PacakKeresese(kep, NarancsThreshold, MeretThreshold);
-	PontSugar legjobb_kor = PontSugar(0, 0, 0);
-	if (Pacak.size() > 0)
-	{
-		float legjobb_josag = 0;
-		//cout << "Talalt pacak szama: " << to_string(Pacak.size()) << endl;
-		for each (vector<Pont> paca in Pacak)
-		{
-			PacaManager PM = PacaManager(paca);
-			if (PM.josag>legjobb_josag)
-			{
-				legjobb_josag = PM.josag;
-				legjobb_kor = PontSugar(PM.X, PM.Y, PM.r);
-			}
-		}
-	}
-	return legjobb_kor;
-}
-cv::Mat DifiKepzes(cv::Mat kep, Vec3f Ballszin, Vec3f BackGroundszin)
-{
-	vector<cv::Mat> savok(3);
-	cv::split(kep, savok);
+	vector<cv::Mat> Channels(3);
+	cv::split(Image, Channels);
 	float min = 0, max = 0;
-	Vec3f szindifik = (BackGroundszin - Ballszin) / 255;
+	Vec3f ColourDifferences = (BackGroundColour - BallColour) / 255;
 	for (int i = 0; i < 3; i++)
 	if (szindifik[i]<0)
-		min += szindifik[i] * 255;
+		min += ColourDifferences[i] * 255;
 	else
-		max += szindifik[i] * 255;
+		max += ColourDifferences[i] * 255;
 	float a = 1 / (max - min);
-	cv::Mat Difi = cv::Mat::ones(kep.size().height, kep.size().width, CV_8UC1) * (int)(-min * a);
-	cv::scaleAdd(savok[0], szindifik[2] * a, Difi, Difi);
-	cv::scaleAdd(savok[1], szindifik[1] * a, Difi, Difi);
-	cv::scaleAdd(savok[2], szindifik[0] * a, Difi, Difi);
+	cv::Mat Difi = cv::Mat::ones(Image.size().height, Image.size().width, CV_8UC1) * (int)(-min * a);
+	cv::scaleAdd(Channels[0], ColourDifferences[2] * a, Difi, Difi);
+	cv::scaleAdd(Channels[1], ColourDifferences[1] * a, Difi, Difi);
+	cv::scaleAdd(Channels[2], ColourDifferences[0] * a, Difi, Difi);
 	return Difi;
 }
 cv::Vec4d helyzet(cv::Mat bal_kep, cv::Mat xyz, cv::Mat konfidencia, bool kirajzolas, double meretskala, cv::Mat maszk)
