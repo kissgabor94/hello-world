@@ -29,56 +29,56 @@ using std::cout;
 //Illesztett térgörbe fokszáma (+1)
 #define xdim 3
 
-#define kapuX 5000					//kapu távolsága a kamera középpontjától
-#define kameramagassag 3800			//kamera magassága
 #define labda_sugar 100				//milimeterben
+#define CameraHeight 3800			//kamera magassága
+#define BallRadius 100				//milimeterben
 
 
 //pontosságot befolyásoló paraméterek
-#define hibatures 5
-#define margo_x 120
-#define margo_y 30
+#define ErrorMargin 5
+#define Marginx 120
+#define Marginy 30
 
 //Globális változók
 Serial* SP;
 sl::zed::Camera* zed;
 std::mutex MemLock;
 
-const int szoglepes = 7;
+const int RotationalResolution = 7;
 float conf_canny = 45;
 float conf_hough = 17;
 int conf_minrad = 10;
 int conf_orange_threshold = 128;
-int conf_darab_threshold = 4;
+int conf_quantity_threshold = 4;
 
-Vec3f labda;
-Vec3f hatter;
-int pixelhatar = 160;		//maximum mennyi lehet a talált pixel értéke a szürkeárnyalatos képen
+Vec3f Ball;
+Vec3f BackGround;
+int PixelMargin = 160;		//maximum mennyi lehet a talált pixel értéke a szürkeárnyalatos képen
 
-bool kilep;
-int nehezseg = 1;
+bool Quit;
+int Difficulty = 1;
 sl::zed::InitParams parameters;
-double idosav = 400;
-double sorostreshold = 3;
+double TimeLine = 400;
+double SerialTreshold = 3;
 
-string lampa = "z";
+string Lamp = "z";
 
-vector<Vec3f> KalibraciosMatrix;
-deque<double> tippek;
-const int MA_ablak = 3;
+vector<Vec3f> CalibrationMatrix;
+deque<double> Tips;
+const int MAWindow = 3;
 
 //többszálasítás
-cv::Mat akt_left = cv::Mat(HEIGHT, WIDTH, CV_8UC4);
-cv::Mat elozo_left = cv::Mat(HEIGHT, WIDTH, CV_8UC4);
-long long akt_ido;
-long long elozo_ido;
-sl::zed::Mat depth_akt;
-cv::Mat depth_elozo = cv::Mat(HEIGHT, WIDTH, CV_32F);
-sl::zed::Mat conf_akt;
-cv::Mat conf_elozo = cv::Mat(HEIGHT, WIDTH, CV_32F);
-sl::zed::Mat xyz_akt;
-cv::Mat xyz_elozo = cv::Mat(HEIGHT, WIDTH, CV_32FC4);
-sl::zed::Mat left_akt;
+cv::Mat curr_left = cv::Mat(HEIGHT, WIDTH, CV_8UC4);
+cv::Mat prev_left = cv::Mat(HEIGHT, WIDTH, CV_8UC4);
+long long curr_Time;
+long long prev_Time;
+sl::zed::Mat depth_curr;
+cv::Mat depth_prev = cv::Mat(HEIGHT, WIDTH, CV_32F);
+sl::zed::Mat conf_curr;
+cv::Mat conf_prev = cv::Mat(HEIGHT, WIDTH, CV_32F);
+sl::zed::Mat xyz_curr;
+cv::Mat xyz_prev = cv::Mat(HEIGHT, WIDTH, CV_32FC4);
+sl::zed::Mat left_curr;
 cv::Mat xyz_mask = cv::Mat(HEIGHT, WIDTH, CV_32FC4);
 cv::Mat xyz_mask_z = cv::Mat(HEIGHT, WIDTH, CV_32F);
 
@@ -159,13 +159,13 @@ void getpicture()
 	}
 
 	MemLock.lock();
-	akt_ido = zed->getCameraTimestamp() / 1000000;
+	curr_Time = zed->getCameraTimestamp() / 1000000;
 
-	xyz_akt = zed->retrieveMeasure(sl::zed::MEASURE::XYZ);
+	xyz_curr = zed->retrieveMeasure(sl::zed::MEASURE::XYZ);
 
-	left_akt = zed->retrieveImage(sl::zed::LEFT);
+	left_curr = zed->retrieveImage(sl::zed::LEFT);
 
-	conf_akt = zed->retrieveMeasure(sl::zed::MEASURE::CONFIDENCE);
+	conf_curr = zed->retrieveMeasure(sl::zed::MEASURE::CONFIDENCE);
 	MemLock.unlock();
 //	cout << "grab end" << endl;
 
@@ -183,7 +183,7 @@ Vec3d polinom(cv::Mat A, double t)
 cv::Mat PolinomEgyutthatok(vector<Vec4d> meresek, vector<double> sulyok)
 {
 	//X * A ~= Y
-	//idohatványmátrix - N x xdim
+	//Timehatványmátrix - N x xdim
 	//Az X mátrixot feltöltjük az idõértékek hatványaival
 	cv::Mat X = Mat::ones(meresek.size(), xdim, CV_64F);
 	cv::Mat W = Mat::zeros(meresek.size(), meresek.size(), CV_64F);
@@ -277,27 +277,27 @@ double root(vector<double> be)
 	{
 
 		cv::Mat ki = cv::Mat::ones(1, 1, CV_64F);
-		double ido = 0;
+		double Time = 0;
 		cv::solvePoly(be, ki, 1000);
 		int db = 0;
 		for (int i = 0; i < ki.size().height; i++)
 		{
 			db = 0;
-			if (ki.at<double>(i, 0)>0 && ki.at<double>(i, 0) > ido)
+			if (ki.at<double>(i, 0)>0 && ki.at<double>(i, 0) > Time)
 			{
 				for (int j = 0; j < ki.size().height; j++)
 				{
 					if (ki.at<double>(i, 0) == ki.at<double>(j, 0))
 						db++;
 				}
-				if (db == 1 && ido>ki.at<double>(i, 0))
+				if (db == 1 && Time>ki.at<double>(i, 0))
 				{
-					ido = ki.at<double>(i, 0);
+					Time = ki.at<double>(i, 0);
 				}
 			}
 		}
 		ki.~Mat();
-		return ido;
+		return Time;
 	}
 }
 bool ZedCsatolas()
@@ -332,9 +332,9 @@ bool SorosCsatolas()
 bool KalibraciosFajlBetoltese()
 {
 	//alapértelmezésként egységmátrix beállítása
-	KalibraciosMatrix.push_back(Vec3f(	1	,	0	,	0	));
-	KalibraciosMatrix.push_back(Vec3f(	0	,	1	,	0	));
-	KalibraciosMatrix.push_back(Vec3f(	0	,	0	,	1	));
+	CalibrationMatrix.push_back(Vec3f(	1	,	0	,	0	));
+	CalibrationMatrix.push_back(Vec3f(	0	,	1	,	0	));
+	CalibrationMatrix.push_back(Vec3f(	0	,	0	,	1	));
 	//HA van kalibrációs fájl, mátrix betöltése
 	string ideig;
 	if (ifstream("kalib.txt"))
@@ -343,11 +343,11 @@ bool KalibraciosFajlBetoltese()
 		for (int a = 0; a < 3; a++)
 		{
 			std::getline(kalib, ideig, ',');
-			KalibraciosMatrix[a][0] = stof(ideig);
+			CalibrationMatrix[a][0] = stof(ideig);
 			std::getline(kalib, ideig, ',');
-			KalibraciosMatrix[a][1] = stof(ideig);
+			CalibrationMatrix[a][1] = stof(ideig);
 			std::getline(kalib, ideig);
-			KalibraciosMatrix[a][2] = stof(ideig);
+			CalibrationMatrix[a][2] = stof(ideig);
 		}
 		kalib.close();
 		std::cout << "Kalibracios fajl beolvasva" << std::endl;
@@ -375,7 +375,7 @@ bool KonfiguraciosFajlBetoltese()
 			std::getline(kalibconf, ideig, ',');
 			conf_orange_threshold = stoi(ideig);
 			std::getline(kalibconf, ideig);
-			conf_darab_threshold = stoi(ideig);
+			conf_quantity_threshold = stoi(ideig);
 		
 		kalibconf.close();
 		std::cout << "Config file betoltve" << endl;
@@ -403,7 +403,7 @@ bool SzinFajlBetoltese()
 		std::getline(kalibcolor, ideig, ',');
 		b = stoi(ideig);
 
-		labda = (r, g, b);
+		Ball = (r, g, b);
 
 		std::getline(kalibcolor, ideig, ',');
 		r = stof(ideig);
@@ -412,7 +412,7 @@ bool SzinFajlBetoltese()
 		std::getline(kalibcolor, ideig, ',');
 		b = stof(ideig);
 
-		hatter = (r, g, b);
+		BackGround = (r, g, b);
 
 		std::getline(kalibcolor, ideig, ',');
 		value = stoi(ideig);
@@ -441,7 +441,7 @@ bool SzinFajlBetoltese()
 		}
 		std::getline(kalibcolor, ideig);
 		value = stoi(ideig);
-		pixelhatar = value;
+		PixelMargin = value;
 
 		kalibcolor.close();
 		std::cout << "Color file betoltve" << endl;
@@ -462,15 +462,15 @@ void HelpKiirasa()
 	std::cout << "a: ZED ujracsatlakozas" << endl;
 	std::cout << "s: soros ujracsatlakozas" << endl;
 	std::cout << "c: kalibracio " << endl;
-	std::cout << "d: nehezseg beallitasa (inaktív)" << endl;
-	std::cout << "q: kilepes" << endl;
-	std::cout << "u: ido merese" << endl;
+	std::cout << "d: Difficulty beallitasa (inaktív)" << endl;
+	std::cout << "q: Quites" << endl;
+	std::cout << "u: Time merese" << endl;
 	std::cout << "v: loves varasa (xyz)" << endl;
 	std::cout << "o: kameraparameterek es szinek beallitasa" << endl;
 }
 String SorosFormatum(double szog)
 {
-	String kimegy = "s"+to_string(nehezseg);
+	String kimegy = "s"+to_string(Difficulty);
 	double S = szog;
 	if (S < -80)
 		S = -80;
@@ -488,7 +488,7 @@ String SorosFormatum(double szog)
 	if (S < 10)
 		kimegy += "0";
 	kimegy += to_string(int(S));
-	kimegy += lampa+"e";
+	kimegy += Lamp+"e";
 	return kimegy;
 }
 void filebairas(string mit)
@@ -514,11 +514,11 @@ void filebairas(string mit)
 double moving_average()
 {
 	double vissza = 0;
-	for (int i = 0; i < MA_ablak; i++)
+	for (int i = 0; i < MAWindow; i++)
 	{
-		vissza += tippek[i];
+		vissza += Tips[i];
 	}
-	vissza /= MA_ablak;
+	vissza /= MAWindow;
 	return vissza;
 }
 struct Pont {
@@ -621,7 +621,7 @@ vector<vector<Pont>> PacakKeresese(cv::Mat kep, uchar NarancsThreshold, int Mere
 	}
 	return vissza;
 }
-PontSugar TalaltLabda(cv::Mat kep, uchar NarancsThreshold, int MeretThreshold)
+PontSugar TalaltBall(cv::Mat kep, uchar NarancsThreshold, int MeretThreshold)
 {
 	vector<vector<Pont>> Pacak = PacakKeresese(kep, NarancsThreshold, MeretThreshold);
 	PontSugar legjobb_kor = PontSugar(0, 0, 0);
@@ -641,12 +641,12 @@ PontSugar TalaltLabda(cv::Mat kep, uchar NarancsThreshold, int MeretThreshold)
 	}
 	return legjobb_kor;
 }
-cv::Mat DifiKepzes(cv::Mat kep, Vec3f labdaszin, Vec3f hatterszin)
+cv::Mat DifiKepzes(cv::Mat kep, Vec3f Ballszin, Vec3f BackGroundszin)
 {
 	vector<cv::Mat> savok(3);
 	cv::split(kep, savok);
 	float min = 0, max = 0;
-	Vec3f szindifik = (hatterszin - labdaszin) / 255;
+	Vec3f szindifik = (BackGroundszin - Ballszin) / 255;
 	for (int i = 0; i < 3; i++)
 	if (szindifik[i]<0)
 		min += szindifik[i] * 255;
@@ -752,11 +752,11 @@ cv::Vec4d helyzet(cv::Mat bal_kep, cv::Mat xyz, cv::Mat konfidencia, bool kirajz
 	float hossz = sqrt(	sulyozott_helyzet[0] * sulyozott_helyzet[0] + 
 						sulyozott_helyzet[1] * sulyozott_helyzet[1] + 
 						sulyozott_helyzet[2] * sulyozott_helyzet[2]);
-	sulyozott_helyzet[0] *= (labda_sugar + hossz) / hossz;
-	sulyozott_helyzet[1] *= (labda_sugar + hossz) / hossz;
-	sulyozott_helyzet[2] *= (labda_sugar + hossz) / hossz;
+	sulyozott_helyzet[0] *= (BallRadius + hossz) / hossz;
+	sulyozott_helyzet[1] *= (BallRadius + hossz) / hossz;
+	sulyozott_helyzet[2] *= (BallRadius + hossz) / hossz;
 
-	sulyozott_helyzet[2] = kameramagassag - sulyozott_helyzet[2];
+	sulyozott_helyzet[2] = CameraHeight - sulyozott_helyzet[2];
 
 	return Vec4d((double)sulyozott_helyzet[0], (double)sulyozott_helyzet[1], (double)sulyozott_helyzet[2], (float)vizsgalt_pixel_darab / sulyosszeg);
 }
@@ -853,11 +853,11 @@ cv::Vec4d helyzet5(cv::Mat bal_kep, cv::Mat xyz, cv::Mat konfidencia, bool kiraj
 		destroyAllWindows();
 	}
 	float hossz = sqrt(s[0] * s[0] + s[1] * s[1] + s[2] * s[2]);
-	s[0] *= (labda_sugar + hossz) / hossz;
-	s[1] *= (labda_sugar + hossz) / hossz;
-	s[2] *= (labda_sugar + hossz) / hossz;
+	s[0] *= (BallRadius + hossz) / hossz;
+	s[1] *= (BallRadius + hossz) / hossz;
+	s[2] *= (BallRadius + hossz) / hossz;
 
-	s[2] = kameramagassag - s[2];
+	s[2] = CameraHeight - s[2];
 
 	return Vec4d((double)s[0], (double)s[1], (double)s[2], (float)cs / c);
 }
@@ -937,15 +937,15 @@ cv::Vec4d helyzet6(cv::Mat bal_kep, cv::Mat xyz, cv::Mat konfidencia, bool kiraj
 		cvDestroyWindow("talalat");
 		cvDestroyWindow("konfidencia");
 	}
-	s[2] = kameramagassag - s[2];
+	s[2] = CameraHeight - s[2];
 	return Vec4d((double)s[0], (double)s[1], (double)s[2], (float)cs / c);
 }
 cv::Vec4d PozicioKereses(bool difkep, vector<double>& suly, cv::Mat maszk)
 {
 
-	Vec4d pozi = helyzet5(elozo_left, xyz_elozo, conf_elozo, difkep, 0.25/*, maszk*/);
+	Vec4d pozi = helyzet5(prev_left, xyz_prev, conf_prev, difkep, 0.25/*, maszk*/);
 //	suly.push_back(pozi[3]);
-//	pozi[3] = double(elozo_ido);
+//	pozi[3] = double(prev_Time);
 	return pozi;
 }
 
@@ -962,8 +962,8 @@ int main(int argc, char** argv)
 	parameters.mode = sl::zed::QUALITY;
 	parameters.unit = sl::zed::MILLIMETER;
 
-	labda = (255, 0, 0);
-	hatter = (0, 255, 0);
+	Ball = (255, 0, 0);
+	BackGround = (0, 255, 0);
 	
 	bool ZedKapcsolvaVan = false;
 	bool SorosKapcsolvaVan = false;
@@ -975,7 +975,7 @@ int main(int argc, char** argv)
 	
 	ZedKapcsolvaVan = ZedCsatolas();
 	SorosKapcsolvaVan = SorosCsatolas();
-	nehezseg = 1;
+	Difficulty = 1;
 	while (zed->getSelfCalibrationStatus() == 1)
 	{
 		;
@@ -1085,7 +1085,7 @@ int main(int argc, char** argv)
 						std::getline(pontok, ertekz, ';');
 						std::getline(pontok, ertekt);
 						szog = atan2(stod(erteky), stod(ertekz)) * 180 / 3.141;
-						szog = szoglepes * round(szog / szoglepes);
+						szog = RotationalResolution * round(szog / RotationalResolution);
 						adat = SorosFormatum(szog);
 						for (int i = 0; i < 7; i++)
 							nev[i] = adat[i];
@@ -1107,31 +1107,31 @@ int main(int argc, char** argv)
 					{
 						;
 					}
-					akt_ido = zed->getCameraTimestamp() / 1000000;
+					curr_Time = zed->getCameraTimestamp() / 1000000;
 
-					xyz_akt = zed->retrieveMeasure(sl::zed::MEASURE::XYZ);
+					xyz_curr = zed->retrieveMeasure(sl::zed::MEASURE::XYZ);
 
-					left_akt = zed->retrieveImage(sl::zed::LEFT);
+					left_curr = zed->retrieveImage(sl::zed::LEFT);
 
-					conf_akt = zed->retrieveMeasure(sl::zed::MEASURE::CONFIDENCE);
+					conf_curr = zed->retrieveMeasure(sl::zed::MEASURE::CONFIDENCE);
 
 				//	MemLock.lock();
-					elozo_ido = akt_ido;
-					std::memcpy(elozo_left.data, left_akt.data, WIDTH * HEIGHT * 4);
-					std::memcpy(conf_elozo.data, conf_akt.data, WIDTH * HEIGHT * 4);
-					std::memcpy(xyz_elozo.data, xyz_akt.data, WIDTH * HEIGHT * 16);
+					prev_Time = curr_Time;
+					std::memcpy(prev_left.data, left_curr.data, WIDTH * HEIGHT * 4);
+					std::memcpy(conf_prev.data, conf_curr.data, WIDTH * HEIGHT * 4);
+					std::memcpy(xyz_prev.data, xyz_curr.data, WIDTH * HEIGHT * 16);
 				//	MemLock.unlock();
 					vector<double> weights;
 					long long kezd = getCPUTickCount();
-				//	cout << xyz_elozo.rows << endl;
-					Vec4d AktualisPozicio = helyzet5(elozo_left, xyz_elozo, conf_elozo, false, 0.25/*, xyz_mask_z*/);
+				//	cout << xyz_prev.rows << endl;
+					Vec4d AktualisPozicio = helyzet5(prev_left, xyz_prev, conf_prev, false, 0.25/*, xyz_mask_z*/);
 					long long vege = getCPUTickCount();
-					cout << "ido: " << double(vege - kezd) / getTickFrequency() << endl;
+					cout << "Time: " << double(vege - kezd) / getTickFrequency() << endl;
 					AktualisPozicio[3] = double(zed->getCameraTimestamp() / 1000000);
 					std::cout << "Pozíció: X: " << AktualisPozicio[0] << " Y: " << AktualisPozicio[1] << " Z: " << AktualisPozicio[2] << endl; //
-					if (AktualisPozicio[2] != (double)kameramagassag)
+					if (AktualisPozicio[2] != (double)CameraHeight)
 					{
-						cv::imshow("Kamerakep", elozo_left);
+						cv::imshow("Kamerakep", prev_left);
 						cv::waitKey(0);
 						cv::destroyWindow("Kamerakep");
 					}
@@ -1141,31 +1141,31 @@ int main(int argc, char** argv)
 		case 'D':
 		{
 					std::cout << "A nehézség új értéke: ";
-					char NehezsegChar = ' ';
-					std::cin >> NehezsegChar;
+					char DifficultyChar = ' ';
+					std::cin >> DifficultyChar;
 					std::cout << endl;
-					switch (NehezsegChar)
+					switch (DifficultyChar)
 					{
 					case '1':
-						nehezseg = 1;
+						Difficulty = 1;
 						break;
 					case '2':
-						nehezseg = 2;
+						Difficulty = 2;
 						break;
 					case '3':
-						nehezseg = 3;
+						Difficulty = 3;
 						break;
 					case '4':
-						nehezseg = 4;
+						Difficulty = 4;
 						break;
 					case '5':
-						nehezseg = 5;
+						Difficulty = 5;
 						break;
 					default:
-						nehezseg = 1;
+						Difficulty = 1;
 						break;
 					}
-					std::cout << "Nehezseg beallitva " << nehezseg << " ertekre" << endl;
+					std::cout << "Difficulty beallitva " << Difficulty << " ertekre" << endl;
 					break;
 		}
 		case 'c':
@@ -1178,11 +1178,11 @@ int main(int argc, char** argv)
 						std::thread behuzo_szal(getpicture); //betöltünk egy képet, hogy ne legyen üres az akt
 						behuzo_szal.join(); // megvárjuk amíg a szál végez
 						behuzo_szal.~thread();//megszüntetjük a szálat
-						elozo_ido = akt_ido; // adatok átmásolása
-						memcpy(elozo_left.data, left_akt.data, WIDTH * HEIGHT * 4);
-						memcpy(conf_elozo.data, conf_akt.data, WIDTH * HEIGHT * 4);
-						memcpy(xyz_elozo.data, xyz_akt.data, WIDTH * HEIGHT * 16);
-						xyz_mask += xyz_elozo;
+						prev_Time = curr_Time; // adatok átmásolása
+						memcpy(prev_left.data, left_curr.data, WIDTH * HEIGHT * 4);
+						memcpy(conf_prev.data, conf_curr.data, WIDTH * HEIGHT * 4);
+						memcpy(xyz_prev.data, xyz_curr.data, WIDTH * HEIGHT * 16);
+						xyz_mask += xyz_prev;
 					}
 					xyz_mask /= 10;
 					cv::split(xyz_mask, sav);
@@ -1196,9 +1196,9 @@ int main(int argc, char** argv)
 					for (int i = 0; i < 3; i++)
 					for (int j = 0; j < 3; j++)
 					if (i == j)
-						KalibraciosMatrix[i][j] = 1;
+						CalibrationMatrix[i][j] = 1;
 					else
-						KalibraciosMatrix[i][j] = 0;
+						CalibrationMatrix[i][j] = 0;
 
 
 					sl::zed::Mat LL;
@@ -1245,19 +1245,19 @@ int main(int argc, char** argv)
 					double cp = cos(psi);
 					double so = sin(ome);
 					double sp = sin(psi);
-					KalibraciosMatrix[0][0] = co;
-					KalibraciosMatrix[1][0] = sp*so;
-					KalibraciosMatrix[2][0] = cp*so;
-					KalibraciosMatrix[1][1] = cp;
-					KalibraciosMatrix[2][1] = -sp;
-					KalibraciosMatrix[0][2] = -so;
-					KalibraciosMatrix[1][2] = sp*co;
-					KalibraciosMatrix[2][2] = cp*co;
+					CalibrationMatrix[0][0] = co;
+					CalibrationMatrix[1][0] = sp*so;
+					CalibrationMatrix[2][0] = cp*so;
+					CalibrationMatrix[1][1] = cp;
+					CalibrationMatrix[2][1] = -sp;
+					CalibrationMatrix[0][2] = -so;
+					CalibrationMatrix[1][2] = sp*co;
+					CalibrationMatrix[2][2] = cp*co;
 
 					ofstream ki("kalib.txt");
 					for (int a = 0; a < 3; a++)
 					{
-						ki << to_string(KalibraciosMatrix[a][0]) << "," << to_string(KalibraciosMatrix[a][1]) << "," << to_string(KalibraciosMatrix[a][2]) << std::endl;
+						ki << to_string(CalibrationMatrix[a][0]) << "," << to_string(CalibrationMatrix[a][1]) << "," << to_string(CalibrationMatrix[a][2]) << std::endl;
 					}
 
 					//DESTRUKCIÓ
@@ -1300,18 +1300,18 @@ int main(int argc, char** argv)
 		{
 					if (ZedKapcsolvaVan)
 					{
-						for (int i = 0; i < MA_ablak; i++)
+						for (int i = 0; i < MAWindow; i++)
 						{
-							tippek.push_front(0.0);
+							Tips.push_front(0.0);
 						}
 						vector<double> weights;
 						vector<Vec4d> ErzekeltPoziciok;
 						vector<Vec4d> MeroPoziciok;
 						cv::Vec4d AktualisPozicio;// = PozicioKereses(false, weights);
 						cv::Vec4d elozo = cv::Vec4d(-6000, 0, 0, 0);
-						string palya_akt = "ido_akt;poz_X;poz_Y;poz_Z;ETA;EYA;EZA;Ax0;Ay0;Az0;Ax1;Ay1;Az1;Ax2;Ay2;Az2;Ax3;Ay3;Az3\n";
+						string palya_curr = "Time_curr;poz_X;poz_Y;poz_Z;ETA;EYA;EZA;Ax0;Ay0;Az0;Ax1;Ay1;Az1;Ax2;Ay2;Az2;Ax3;Ay3;Az3\n";
 						double sorosmost;
-						kilep = false;
+						Quit = false;
 						bool firstcall = true;
 						bool votma = false;
 						double sebesseg;
@@ -1326,11 +1326,11 @@ int main(int argc, char** argv)
 							std::thread behuzo_szal(getpicture); //betöltünk egy képet, hogy ne legyen üres az akt
 							behuzo_szal.join(); // megvárjuk amíg a szál végez
 							behuzo_szal.~thread();//megszüntetjük a szálat
-							elozo_ido = akt_ido; // adatok átmásolása
-							memcpy(elozo_left.data, left_akt.data, WIDTH * HEIGHT * 4);
-							memcpy(conf_elozo.data, conf_akt.data, WIDTH * HEIGHT * 4);
-							memcpy(xyz_elozo.data, xyz_akt.data, WIDTH * HEIGHT * 16);
-							xyz_mask += xyz_elozo;
+							prev_Time = curr_Time; // adatok átmásolása
+							memcpy(prev_left.data, left_curr.data, WIDTH * HEIGHT * 4);
+							memcpy(conf_prev.data, conf_curr.data, WIDTH * HEIGHT * 4);
+							memcpy(xyz_prev.data, xyz_curr.data, WIDTH * HEIGHT * 16);
+							xyz_mask += xyz_prev;
 						}
 						xyz_mask /= 10;
 						cv::split(xyz_mask, sav);
@@ -1339,20 +1339,20 @@ int main(int argc, char** argv)
 						grab.join();
 						grab.~thread();
 						MemLock.lock();
-						elozo_ido = akt_ido;
-						std::memcpy(elozo_left.data, left_akt.data, WIDTH * HEIGHT * 4);
-						std::memcpy(conf_elozo.data, conf_akt.data, WIDTH * HEIGHT * 4);
-						std::memcpy(xyz_elozo.data, xyz_akt.data, WIDTH * HEIGHT * 16);
+						prev_Time = curr_Time;
+						std::memcpy(prev_left.data, left_curr.data, WIDTH * HEIGHT * 4);
+						std::memcpy(conf_prev.data, conf_curr.data, WIDTH * HEIGHT * 4);
+						std::memcpy(xyz_prev.data, xyz_curr.data, WIDTH * HEIGHT * 16);
 						MemLock.unlock();
 						MemLock.lock();
-						double START_TIME = double(elozo_ido);
+						double START_TIME = double(prev_Time);
 						MemLock.unlock();
 						//						double START_TIME = double(zed->getCameraTimestamp()) / 1000000;
 						double NOW_TIME = 0;
 
 						double ETA;
 
-						//idohatványmátrix - N x xdim
+						//Timehatványmátrix - N x xdim
 						cv::Mat X;
 						//pozíciómátrix - N x 3
 						cv::Mat Y;
@@ -1371,24 +1371,24 @@ int main(int argc, char** argv)
 
 						//	cout << "pic end" << endl;
 						//	cout << "proba " << AktualisPozicio[0] << " " << AktualisPozicio[1] << " " << AktualisPozicio[2] << endl;
-							if (AktualisPozicio[2] < kameramagassag && AktualisPozicio[2]!=0  /*&& ErzekeltPoziciok[ErzekeltPoziciok.size()-1][3]!=double(elozo_ido)*/)
+							if (AktualisPozicio[2] < CameraHeight && AktualisPozicio[2]!=0  /*&& ErzekeltPoziciok[ErzekeltPoziciok.size()-1][3]!=double(prev_Time)*/)
 							{
-								if (AktualisPozicio[0] > elozo[0]/*&& double(elozo_ido)-START_TIME>0*/)
+								if (AktualisPozicio[0] > elozo[0]/*&& double(prev_Time)-START_TIME>0*/)
 								{
 									
 									weights.push_back(AktualisPozicio[3]);
-									AktualisPozicio[3] = double(elozo_ido);
+									AktualisPozicio[3] = double(prev_Time);
 									NOW_TIME = AktualisPozicio[3] - START_TIME;
 									ErzekeltPoziciok.push_back(AktualisPozicio);
 									ErzekeltPoziciok[ErzekeltPoziciok.size() - 1][3] = NOW_TIME;
-									if (count < hibatures)
+									if (count < ErrorMargin)
 										count++;
 									else
 										votma = true;
 
-									cout << "HELYES - count: " << count << '/' << hibatures << endl;
+									cout << "HELYES - count: " << count << '/' << ErrorMargin << endl;
 									std::cout << '\t' << "t=" << NOW_TIME << " - terpozicio: X= " << AktualisPozicio[0] << " Y= " << AktualisPozicio[1] << " Z= " << AktualisPozicio[2] << endl;
-									palya_akt += to_string(NOW_TIME) + ';' + to_string(AktualisPozicio[0]) + ';' + to_string(AktualisPozicio[1]) + ';' + to_string(AktualisPozicio[2]) + ';';
+									palya_curr += to_string(NOW_TIME) + ';' + to_string(AktualisPozicio[0]) + ';' + to_string(AktualisPozicio[1]) + ';' + to_string(AktualisPozicio[2]) + ';';
 								}
 								else
 								{
@@ -1396,7 +1396,7 @@ int main(int argc, char** argv)
 									{
 										if (votma)
 										{
-											kilep = true;
+											Quit = true;
 										}
 										else
 										{
@@ -1405,8 +1405,8 @@ int main(int argc, char** argv)
 									}
 									else
 										count--;
-									cout << "HIBA: visszamozgas - count:" << count << '/' << hibatures << endl;
-									palya_akt += to_string(NOW_TIME) + ";;;;";
+									cout << "HIBA: visszamozgas - count:" << count << '/' << ErrorMargin << endl;
+									palya_curr += to_string(NOW_TIME) + ";;;;";
 								}
 								//ha nem érte még el a határt a találatok száma,
 								// de visszasüllyedt nullára, akkor töröljük mindet, mert csak valami szarságot talált
@@ -1422,16 +1422,16 @@ int main(int argc, char** argv)
 								{
 									if (votma)
 									{
-										kilep = true;
+										Quit = true;
 									}
 									else
 										START_TIME = double(zed->getCameraTimestamp()) / 1000000.0;
 								}
 								else
 									count--;
-								cout << "HIBA: nincs talalat - count:" << count << '/' << hibatures << endl;
+								cout << "HIBA: nincs talalat - count:" << count << '/' << ErrorMargin << endl;
 
-								palya_akt += to_string(NOW_TIME) + ";;;;";
+								palya_curr += to_string(NOW_TIME) + ";;;;";
 							}
 
 							//----------------------------------------------------------------------------
@@ -1444,13 +1444,13 @@ int main(int argc, char** argv)
 								ErzekeltPoziciok.clear();
 								firstcall = false;
 							}
-							if (ErzekeltPoziciok.size() == conf_darab_threshold-1)
+							if (ErzekeltPoziciok.size() == conf_quantity_threshold-1)
 								{
-								int nehezsegvolt = nehezseg;
-								nehezseg = 3;
+								int Difficultyvolt = Difficulty;
+								Difficulty = 3;
 								if (ErzekeltPoziciok[2][1]>ErzekeltPoziciok[0][1])
 									{
-									tippek.push_back(30);
+									Tips.push_back(30);
 										String output = SorosFormatum(30);
 										char nev[7];
 										for (int i = 0; i < 7; i++)
@@ -1460,7 +1460,7 @@ int main(int argc, char** argv)
 									}
 									else
 									{
-										tippek.push_back(-30);
+										Tips.push_back(-30);
 										String output = SorosFormatum(-30);
 										char nev[7];
 										for (int i = 0; i < 7; i++)
@@ -1468,7 +1468,7 @@ int main(int argc, char** argv)
 										SP->WriteData(nev, 7);
 										cout << "soros: -30" << endl;
 									}
-									nehezseg = nehezsegvolt;
+									Difficulty = Difficultyvolt;
 								}
 							if (ErzekeltPoziciok.size() >= xdim)
 							{
@@ -1486,10 +1486,10 @@ int main(int argc, char** argv)
 								vector<double> be;
 								for (int i = 0; i < xdim; i++)
 									be.push_back(A.at<double>(i, 0));
-								be[0] -= kapuX;
+								be[0] -= goalX;
 								be[2] /= 2;
 								ETA = root(be);
-								palya_akt += to_string(ETA) + ';';
+								palya_curr += to_string(ETA) + ';';
 								be.~vector();
 
 								cout << '\t' << "ETA: " << ETA << " ; ";
@@ -1498,10 +1498,10 @@ int main(int argc, char** argv)
 								cout << "y: " << erkezes[1] << " z: " << erkezes[2] << endl;
 
 								{//fajlba iras adatok
-									palya_akt += to_string(erkezes[1]) + ";" + to_string(erkezes[2]) + ";";
+									palya_curr += to_string(erkezes[1]) + ";" + to_string(erkezes[2]) + ";";
 									for (int beta = 0; beta < 3; beta++)
 									for (int ceta = 0; ceta < 3; ceta++)
-										palya_akt += to_string(A.at<double>(beta, ceta)) + ";";
+										palya_curr += to_string(A.at<double>(beta, ceta)) + ";";
 								}
 
 								double szogallas = atan2(erkezes[1], erkezes[2]) * 180 / 3.141;
@@ -1519,10 +1519,10 @@ int main(int argc, char** argv)
 									szogallas = -80;
 								if (szogallas > 80)
 									szogallas = 80;
-								if (/*szogallas!=80 && szogallas!= -80 &&*/ ErzekeltPoziciok.size() >= conf_darab_threshold && abs(tippek[tippek.size()-1]-szogallas)>8)
+								if (/*szogallas!=80 && szogallas!= -80 &&*/ ErzekeltPoziciok.size() >= conf_quantity_threshold && abs(Tips[Tips.size()-1]-szogallas)>8)
 								{
 //								cout << "soros: " << szogallas << endl;
-									tippek.push_front(szogallas);
+									Tips.push_front(szogallas);
 									if (szogallas > 10)
 										szogallas += 4;
 									else
@@ -1540,27 +1540,27 @@ int main(int argc, char** argv)
 								}
 							}
 							MemLock.lock();
-							elozo_ido = akt_ido;
-							std::memcpy(elozo_left.data, left_akt.data, WIDTH * HEIGHT * 4);
-							std::memcpy(conf_elozo.data, conf_akt.data, WIDTH * HEIGHT * 4);
-							std::memcpy(xyz_elozo.data, xyz_akt.data, WIDTH * HEIGHT * 16);
+							prev_Time = curr_Time;
+							std::memcpy(prev_left.data, left_curr.data, WIDTH * HEIGHT * 4);
+							std::memcpy(conf_prev.data, conf_curr.data, WIDTH * HEIGHT * 4);
+							std::memcpy(xyz_prev.data, xyz_curr.data, WIDTH * HEIGHT * 16);
 							MemLock.unlock();
-							if (palya_akt.length() > 0)
-							if (palya_akt[palya_akt.length() - 1] != '\n')
-								palya_akt += '\n';
+							if (palya_curr.length() > 0)
+							if (palya_curr[palya_curr.length() - 1] != '\n')
+								palya_curr += '\n';
 							grab.join();
 							grab.~thread();
-						//	kilep = (GetAsyncKeyState(VK_ESCAPE) & 0x8000);
-						}while (!kilep && !(GetAsyncKeyState(VK_ESCAPE) & 0x8000));
+						//	Quit = (GetAsyncKeyState(VK_ESCAPE) & 0x8000);
+						}while (!Quit && !(GetAsyncKeyState(VK_ESCAPE) & 0x8000));
 
 						int utolso = ErzekeltPoziciok.size() - 1;
 						sebessegx = (ErzekeltPoziciok[utolso][0] - ErzekeltPoziciok[0][0]) / (ErzekeltPoziciok[utolso][3] - ErzekeltPoziciok[0][3]);
 						sebessegy = (ErzekeltPoziciok[utolso][1] - ErzekeltPoziciok[0][1]) / (ErzekeltPoziciok[utolso][3] - ErzekeltPoziciok[0][3]);
 						sebessegz = (ErzekeltPoziciok[utolso][2] - ErzekeltPoziciok[0][2]) / (ErzekeltPoziciok[utolso][3] - ErzekeltPoziciok[0][3]);
 						sebesseg = sqrt(sebessegx*sebessegx + sebessegy*sebessegy + sebessegz*sebessegz);
-						cout << endl << endl << "A labda sebessege: " << sebesseg * 3.6 << "km/h" << endl;
-						filebairas(palya_akt);
-						tippek.clear();
+						cout << endl << endl << "A Ball sebessege: " << sebesseg * 3.6 << "km/h" << endl;
+						filebairas(palya_curr);
+						Tips.clear();
 					}
 		}
 		}
@@ -1572,22 +1572,22 @@ int main(int argc, char** argv)
 		
 	SP->~Serial();
 		
-	for each (Mat var in KalibraciosMatrix)
+	for each (Mat var in CalibrationMatrix)
 	{
 		var.~Mat();
 	}
-	KalibraciosMatrix.~vector();
+	CalibrationMatrix.~vector();
 //	MemLock.~_Mutex_base;
 	
 
-	akt_left.~Mat();
-	elozo_left.~Mat();
-	depth_akt.~Mat();
-	depth_elozo.~Mat();
-	conf_akt.~Mat();
-	conf_elozo.~Mat();
-	xyz_akt.~Mat();
-	xyz_elozo.~Mat();
+	curr_left.~Mat();
+	prev_left.~Mat();
+	depth_curr.~Mat();
+	depth_prev.~Mat();
+	conf_curr.~Mat();
+	conf_prev.~Mat();
+	xyz_curr.~Mat();
+	xyz_prev.~Mat();
 	delete zed;
 	cout << "Objektumok destrualva" << endl;
 	std::cin.ignore();
