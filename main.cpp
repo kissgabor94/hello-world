@@ -29,7 +29,7 @@ using std::cout;
 //Illesztett térgörbe fokszáma (+1)
 #define xdim 3
 
-#define labda_sugar 100				//milimeterben
+#define goalX 5000					//kapu távolsága a kamera középpontjától
 #define CameraHeight 3800			//kamera magassága
 #define BallRadius 100				//milimeterben
 
